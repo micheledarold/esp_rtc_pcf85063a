@@ -43,10 +43,73 @@ dependencies:
 ```
 
 Richiede l'API I2C master "nuova" di ESP-IDF (`driver/i2c_master.h`, disponibile da
-IDF 5.2). Nel `CMakeLists.txt` dell'app va aggiunto `esp_rtc_pcf85063a` a
-`PRIV_REQUIRES`/`REQUIRES`.
+IDF 5.2).
 
-## Come integrarlo
+## Come aggiungerlo a un progetto
+
+Il componente non e' pubblicato sull'ESP Component Registry: si referenzia
+direttamente dal repository git, pinnando un tag di versione. Nel manifest
+dell'applicazione, `main/idf_component.yml`:
+
+```yaml
+dependencies:
+  esp_rtc_pcf85063a:
+    git: "https://github.com/micheledarold/esp_rtc_pcf85063a.git"
+    version: "v0.2.0"
+```
+
+In `main/CMakeLists.txt` va poi aggiunto il componente fra i requisiti, perche'
+l'header sia visibile:
+
+```cmake
+idf_component_register(SRCS "main.c"
+                       INCLUDE_DIRS "."
+                       REQUIRES esp_rtc_pcf85063a esp_driver_i2c)
+```
+
+Al primo `idf.py build` il component manager scarica il componente in
+`managed_components/` e ne registra il commit in `dependencies.lock`.
+
+### Durante lo sviluppo del componente
+
+Per lavorare su una copia locale senza passare da git, si sostituisce `git:` +
+`version:` con `path:`:
+
+```yaml
+dependencies:
+  esp_rtc_pcf85063a:
+    path: "/percorso/locale/esp_rtc_pcf85063a"
+```
+
+In alternativa, senza toccare il manifest, si passa la directory del componente
+sulla riga di comando: `idf.py -DEXTRA_COMPONENT_DIRS=/percorso/locale/esp_rtc_pcf85063a build`.
+Il component manager segnala l'override con un `NOTICE` e usa la copia locale.
+Attenzione: entrambe le vie riscrivono `dependencies.lock` facendolo puntare al
+percorso locale, quindi va rigenerato prima di committare.
+
+### Aggiornare a una nuova versione
+
+Cambiare il `version:` nel manifest **non basta**: `dependencies.lock` continua a
+pinnare il commit precedente, e `idf.py build`/`reconfigure` non lo riscrivono da
+soli. Si limitano ad avvisare, per poi proseguire con la versione vecchia:
+
+```
+Dependency "esp_rtc_pcf85063a": "<vecchio commit>" -> "<nuovo commit>"
+Consider running "idf.py update-dependencies" to update your lock file.
+```
+
+Va quindi eseguito esplicitamente:
+
+```bash
+idf.py update-dependencies
+```
+
+che aggiorna `dependencies.lock` e `managed_components/`. Il component manager
+tiene una cache dei cloni git in `~/.cache/Espressif/ComponentManager/`: se un tag
+viene spostato dopo essere stato pubblicato puo' essere necessario svuotarla per
+farne rileggere il nuovo valore.
+
+## Come usarlo
 
 Il PCF85063A ha indirizzo I2C fisso `0x51` (non configurabile). Basta un bus I2C
 gia' creato con `i2c_new_master_bus()` — lo stesso bus puo' gia' avere altri device
