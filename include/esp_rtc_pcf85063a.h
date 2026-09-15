@@ -40,10 +40,34 @@ typedef enum {
 typedef struct {
     uint32_t scl_speed_hz;                ///< Velocita' I2C per questo device (0 = usa il default 400000 Hz)
     pcf85063a_quartz_load_t quartz_load;  ///< Capacita' di carico del quarzo (obbligatoria)
+
+    /**
+     * Tentativi aggiuntivi del controllo di presenza, oltre al primo (0 = nessun
+     * ritentativo, un solo tentativo in tutto).
+     *
+     * Serve quando l'alimentazione del chip sale lentamente — tipicamente un
+     * supercap o una batteria di backup in carica — e all'avvio il chip non
+     * risponde ancora su I2C pur essendo presente. Il ritentativo riguarda solo
+     * il controllo di presenza: se il chip risponde ma una delle scritture di
+     * configurazione fallisce, pcf85063a_new() fallisce senza ritentare.
+     *
+     * Attenzione al tempo di blocco: il caso peggiore e'
+     * @c probe_retries * @c probe_retry_delay_ms, durante il quale la funzione
+     * dorme. Per attese lunghe (secondi) conviene chiamare pcf85063a_new() da un
+     * task dedicato invece di allungare questo budget nel percorso di avvio.
+     */
+    uint8_t probe_retries;
+
+    /// Attesa fra un tentativo e il successivo, in ms. Ignorato se @c probe_retries e' 0.
+    uint16_t probe_retry_delay_ms;
 } pcf85063a_config_t;
 
 /**
  * @brief Valori di default per pcf85063a_config_t
+ *
+ * Nessun ritentativo del controllo di presenza, per non introdurre attese
+ * inattese nel percorso di avvio: va abilitato esplicitamente da chi ne ha
+ * bisogno.
  *
  * @note Lascia deliberatamente @c quartz_load non impostato: l'applicazione deve
  *       valorizzarlo in base al quarzo della board, altrimenti pcf85063a_new()
@@ -57,6 +81,8 @@ typedef struct {
     {                                                       \
         .scl_speed_hz = 400000,                             \
         .quartz_load  = PCF85063A_QUARTZ_LOAD_UNSPECIFIED,  \
+        .probe_retries = 0,                                 \
+        .probe_retry_delay_ms = 20,                         \
     }
 
 /**
@@ -66,15 +92,31 @@ typedef struct {
  * PCF85063A_QUARTZ_LOAD_UNSPECIFIED la funzione ritorna ESP_ERR_INVALID_ARG.
  *
  * Verifica la presenza del chip con una lettura (non distruttiva) del registro
- * Seconds. Se il flag OS risulta attivo esegue un software reset preventivo: il
- * datasheet del PCF85063A segnala che una piccola percentuale di esemplari puo'
- * avere i registri corrotti dopo il power-on reset automatico. Applica poi la
+ * Seconds, eventualmente ritentata secondo @c config->probe_retries. Se il flag
+ * OS risulta attivo esegue un software reset preventivo: il datasheet del
+ * PCF85063A segnala che una piccola percentuale di esemplari puo' avere i
+ * registri corrotti dopo il power-on reset automatico. Applica poi la
  * configurazione del driver su Control_1 (modalita' 24 ore, STOP/EXT_TEST/CIE
  * azzerati, CAP_SEL secondo config->quartz_load).
+ *
+ * Finche' questa funzione non e' riuscita l'ora letta dal chip non e'
+ * attendibile: e' questa chiamata a stabilire la modalita' 24 ore su cui
+ * pcf85063a_get_time() si basa, e la capacita' di carico del quarzo. Un handle
+ * non c'e' proprio, quindi in caso di fallimento va ritentata prima di poter
+ * usare l'RTC.
  *
  * @param[in] bus_handle Handle del bus I2C (puo' essere condiviso con altri device, es. il touch)
  * @param[in] config Configurazione dell'istanza
  * @param[out] out_handle Handle restituito
+ *
+ * @return
+ *      - ESP_OK: istanza creata e configurata
+ *      - ESP_ERR_NOT_FOUND: il chip non risponde su I2C. E' assente, oppure non
+ *        e' ancora alimentato: con un supercap o una batteria di backup in carica
+ *        la condizione e' transitoria e la chiamata va ripetuta piu' tardi.
+ *      - ESP_ERR_INVALID_ARG: argomenti o configurazione non validi
+ *      - ESP_ERR_NO_MEM: memoria insufficiente
+ *      - altro: errore di comunicazione I2C durante la configurazione
  */
 esp_err_t pcf85063a_new(i2c_master_bus_handle_t bus_handle, const pcf85063a_config_t *config, pcf85063a_handle_t *out_handle);
 

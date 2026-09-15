@@ -196,9 +196,16 @@ ESP_ERROR_CHECK(pcf85063a_get_offset(rtc, &applied));
   a `PCF85063A_QUARTZ_LOAD_UNSPECIFIED` e `pcf85063a_new()` rifiuta quel valore.
   Va letto lo schematico della board e dichiarato il valore corrispondente.
 - Se il chip non risponde su I2C in fase di init (`pcf85063a_new`), la funzione
-  ritorna errore invece di proseguire silenziosamente: a differenza di un touch
-  controller, un RTC che non risponde non ha un fallback sensato lato applicazione.
-  Il controllo di presenza e' una lettura, quindi non altera lo stato del chip.
+  ritorna `ESP_ERR_NOT_FOUND` invece di proseguire silenziosamente. Il controllo
+  di presenza e' una lettura, quindi non altera lo stato del chip.
+- **Finche' `pcf85063a_new()` non e' riuscita, l'ora del chip non e' attendibile**:
+  e' quella chiamata a stabilire la modalita' 24 ore su cui si basa
+  `pcf85063a_get_time()`, oltre alla capacita' di carico del quarzo. Se il chip e'
+  alimentato da un supercap o da una batteria di backup in carica, all'avvio puo'
+  non rispondere ancora pur essendo presente: `ESP_ERR_NOT_FOUND` e' allora una
+  condizione transitoria e la creazione va ritentata. Per attese brevi basta
+  `probe_retries`; per attese lunghe conviene chiamare `pcf85063a_new()` da un task
+  dedicato, cosi' da non bloccare l'avvio dell'applicazione (vedi sotto).
 - Se in fase di init il flag OS risulta attivo il driver manda un software reset
   preventivo, come fa il driver Linux: il datasheet segnala che una piccola
   percentuale di esemplari puo' avere i registri corrotti dopo il power-on reset
@@ -209,7 +216,66 @@ ESP_ERROR_CHECK(pcf85063a_get_offset(rtc, &applied));
   che essendo un read-modify-write sul registro Seconds perde la frazione di
   secondo in corso.
 
+## Chip alimentato da supercap o batteria di backup
+
+Se l'alimentazione del PCF85063A sale lentamente, all'avvio il chip puo' non
+rispondere ancora su I2C. `pcf85063a_new()` lo segnala con `ESP_ERR_NOT_FOUND`,
+distinguibile da un errore di programmazione, e la creazione va ritentata.
+
+Per rampe brevi bastano i ritentativi interni:
+
+```c
+pcf85063a_config_t cfg = PCF85063A_CONFIG_DEFAULT();
+cfg.quartz_load = PCF85063A_QUARTZ_LOAD_7000FF;
+cfg.probe_retries = 10;          // fino a 11 tentativi in tutto...
+cfg.probe_retry_delay_ms = 20;   // ...uno ogni 20 ms, quindi al piu' ~200 ms
+```
+
+Il caso peggiore e' `probe_retries * probe_retry_delay_ms` di attesa **bloccante**:
+per rampe dell'ordine dei secondi non va allungato questo budget, ma spostata la
+creazione in un task dedicato, che ritenta finche' non riesce e pubblica l'handle
+all'applicazione:
+
+```c
+static void rtc_init_task(void *arg)
+{
+    pcf85063a_config_t cfg = PCF85063A_CONFIG_DEFAULT();
+    cfg.quartz_load = PCF85063A_QUARTZ_LOAD_7000FF;
+
+    pcf85063a_handle_t rtc = NULL;
+    while (pcf85063a_new((i2c_master_bus_handle_t)arg, &cfg, &rtc) != ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+    // ... pubblica l'handle; fino a qui l'applicazione non deve mostrare un'ora
+    vTaskDelete(NULL);
+}
+```
+
+Finche' l'handle non esiste l'applicazione non ha modo di leggere l'ora, e non
+deve mostrarne una: un orario visualizzato prima che l'init sia riuscita non
+sarebbe attendibile.
+
 ## Changelog
+
+### 0.3.0
+
+Gestisce il caso del chip non ancora alimentato all'avvio, tipico di
+un'alimentazione da supercap o batteria di backup in carica.
+
+- `pcf85063a_new()` ritorna `ESP_ERR_NOT_FOUND` quando il chip non risponde al
+  controllo di presenza, invece di propagare l'errore grezzo del layer I2C. Il
+  chiamante puo' cosi' distinguere "assente o non ancora alimentato", condizione
+  transitoria da ritentare, da un errore di programmazione.
+- Nuovi campi `probe_retries` e `probe_retry_delay_ms` in `pcf85063a_config_t`:
+  ritentano il controllo di presenza a intervalli regolari. Il default resta
+  nessun ritentativo, per non introdurre attese inattese nel percorso di avvio.
+- Il README documenta che finche' `pcf85063a_new()` non e' riuscita l'ora del chip
+  non e' attendibile, perche' e' quella chiamata a stabilire la modalita' 24 ore su
+  cui `get_time()` si basa, e mostra il pattern del task dedicato per le rampe di
+  alimentazione lunghe.
+
+Nessun cambio di comportamento per chi non imposta i nuovi campi, a parte il
+codice di errore piu' specifico.
 
 ### 0.2.0
 

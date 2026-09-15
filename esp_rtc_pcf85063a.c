@@ -13,6 +13,8 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esp_check.h"
 #include "esp_rtc_pcf85063a.h"
 
@@ -169,9 +171,30 @@ esp_err_t pcf85063a_new(i2c_master_bus_handle_t bus_handle, const pcf85063a_conf
 
     // Presence check non distruttivo: una lettura del registro Seconds, che serve
     // anche a leggere il flag OS.
+    //
+    // Con un'alimentazione che sale lentamente (supercap o batteria di backup in
+    // carica) il chip puo' non rispondere ancora su I2C pur essendo presente: il
+    // fallimento e' transitorio, quindi si ritenta quanto richiesto dalla config.
     uint8_t seconds_reg = 0;
-    ret = pcf85063a_read_reg(handle, PCF85063A_REG_SECONDS, &seconds_reg, 1);
-    ESP_GOTO_ON_ERROR(ret, err, TAG, "Chip non risponde su I2C");
+    unsigned attempts = (unsigned)config->probe_retries + 1;
+    for (unsigned i = 0; i < attempts; i++) {
+        if (i > 0) {
+            TickType_t ticks = pdMS_TO_TICKS(config->probe_retry_delay_ms);
+            vTaskDelay(ticks ? ticks : 1); // mai 0 tick: sarebbe un'attesa nulla
+        }
+        ret = pcf85063a_read_reg(handle, PCF85063A_REG_SECONDS, &seconds_reg, 1);
+        if (ret == ESP_OK) {
+            break;
+        }
+    }
+    if (ret != ESP_OK) {
+        // Errore dedicato: il chiamante deve poter distinguere "non c'e' (ancora)"
+        // da un errore di programmazione, per decidere se ritentare piu' tardi.
+        ESP_LOGE(TAG, "Chip non risponde su I2C dopo %u tentativi (%s): assente o non ancora alimentato",
+                 attempts, esp_err_to_name(ret));
+        ret = ESP_ERR_NOT_FOUND;
+        goto err;
+    }
 
     // Se OS e' attivo il chip ha perso alimentazione: il datasheet segnala che una
     // piccola percentuale di esemplari puo' avere i registri corrotti dopo il
